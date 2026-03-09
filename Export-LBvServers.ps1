@@ -1,218 +1,201 @@
-# =====================
-# Configuratie
-# =====================
-$NetScalerHost = "vpx01"
-$NetScalerUser = "nsroot"
-$NetScalerPassword = "nsr00t"
-$CoreLogicPrefix = "VS_CL1009"
-$baseUri = "https://$NetScalerHost/nitro/v1/config"
+param(
+    [string]$NetScalerHost = "vpx01",
+    [string]$NetScalerUser = "nsroot",
+    [string]$NetScalerPassword = "nsr00t",
+    [string]$CoreLogicPrefix = "VS_CL1009"
+)
 
-# =====================
-# Functies
-# =====================
-function Export-NitroObject ($Names, $Type, $TargetDir, $PropertyName, $Session, $ExcludeNames) {
-    $realType = $Type
-    $realProperty = $PropertyName
-    # Volgens documentatie: monitors zijn altijd 'lbmonitor'
-    if ($Type -eq 'monitor' -or $Type -eq 'lbmonitor') {
-        $realType = 'lbmonitor'
-        $realProperty = 'lbmonitor'
+function Invoke-NitroApi ($resourceType, $resourceName = $null, $method = 'Get', $body = $null) {
+    $uri = if ($null -ne $resourceName -and $resourceName -ne '') { "$baseUri/$resourceType/$resourceName" } else { "$baseUri/$resourceType" }
+    try {
+        if ($method -eq 'Post') { return Invoke-RestMethod -Uri $uri -WebSession $session -Method Post -Body $body -ContentType 'application/json' }
+        return Invoke-RestMethod -Uri $uri -WebSession $session -Method Get
     }
-    foreach ($name in $Names) {
-        if ($ExcludeNames -and ($ExcludeNames -contains $name)) { continue }
-        try {
-            $detail = Invoke-RestMethod -Uri "$baseUri/$realType/$name" -WebSession $Session -Method Get
-            $path = Join-Path $TargetDir ("$name.json")
-            $detail.$realProperty | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding UTF8
-        }
-        catch {
-            Write-Warning "Kon $realType $name niet exporteren: $_"
-        }
+    catch {
+        Write-Warning "Nitro API $method failed for ${uri}: $_"
+        return $null
     }
 }
 
-# Haal alleen ServiceGroups en Services (in volgorde) als dependency op voor LBvServer
-function Get-LBvServerDependency ($vserver, $session, $baseUri) {
-    $deps = [ordered]@{
-        ServiceGroups = @()
-        Services      = @()
-    }
-    $bindings = Invoke-RestMethod -Uri "$baseUri/lbvserver_binding/$($vserver.name)" -WebSession $session -Method Get
-    if ($bindings.lbvserver_binding) {
-        foreach ($bind in $bindings.lbvserver_binding) {
-            if ($bind.lbvserver_servicegroup_binding) {
-                foreach ($sg in $bind.lbvserver_servicegroup_binding) {
-                    $sgName = $sg.servicegroupname
-                    $deps.ServiceGroups += $sgName
-                }
-            }
-            if ($bind.lbvserver_service_binding) {
-                foreach ($svc in $bind.lbvserver_service_binding) {
-                    $svcName = $svc.servicename
-                    $deps.Services += $svcName
-                }
-            }
-        }
-    }
-    return $deps
+function Get-NitroCollection ($response, $propertyName) {
+    if (!$response) { return @() }
+    if ($response.PSObject.Properties.Name -notcontains $propertyName) { return @() }
+    return @($response.$propertyName)
 }
 
-# Generieke dependency-functie voor ServiceGroup en Service
-function Get-ObjectDependency ($type, $name, $session, $baseUri, $defaultMonitors) {
-    $deps = [ordered]@{
+function Get-NitroObject ($resourceType, $resourceName, $propertyName = $resourceType) {
+    $response = Invoke-NitroApi $resourceType $resourceName
+    $items = Get-NitroCollection $response $propertyName
+    if ($items.Count -eq 0) { return $null }
+    return $items[0]
+}
+
+function Get-NitroValues ($response, $propertyName, $fieldName, $excludeValues = @()) {
+    $values = @()
+    foreach ($item in (Get-NitroCollection $response $propertyName)) {
+        if ($item.PSObject.Properties.Name -notcontains $fieldName) { continue }
+        $value = $item.$fieldName
+        if ($null -eq $value -or $value -eq '') { continue }
+        if ($excludeValues -contains $value) { continue }
+        $values += $value
+    }
+    return $values
+}
+
+function Get-NitroRecords ($response, $propertyName, $fieldNames) {
+    $records = @()
+    foreach ($item in (Get-NitroCollection $response $propertyName)) {
+        $record = [ordered]@{}
+        foreach ($fieldName in $fieldNames) {
+            if ($item.PSObject.Properties.Name -notcontains $fieldName) { continue }
+            $value = $item.$fieldName
+            if ($null -eq $value -or $value -eq '') { continue }
+            $record[$fieldName] = $value
+        }
+        if ($record.Count -gt 0) { $records += [PSCustomObject]$record }
+    }
+    return $records
+}
+
+function Get-BindingValues ($bindingType, $resourceName, $fieldName, $excludeValues = @()) {
+    $response = Invoke-NitroApi $bindingType $resourceName
+    return , (Get-NitroValues $response $bindingType $fieldName $excludeValues)
+}
+
+function Get-BindingRecords ($bindingType, $resourceName, $fieldNames) {
+    $response = Invoke-NitroApi $bindingType $resourceName
+    return , (Get-NitroRecords $response $bindingType $fieldNames)
+}
+
+function Get-UniqueValues ($values) { return @($values | ? { $null -ne $_ -and $_ -ne '' } | Sort-Object -Unique) }
+
+function Save-JsonFile ($path, $object, $depth = 12) { $object | ConvertTo-Json -Depth $depth | Set-Content -Path $path -Encoding UTF8 }
+
+function Export-NitroObject ($resourceName, $resourceType, $targetDirectory, $propertyName = $resourceType) {
+    $object = Get-NitroObject $resourceType $resourceName $propertyName
+    if (!$object) { Write-Warning "Could not export $resourceType $($resourceName)."; return }
+    Save-JsonFile (Join-Path $targetDirectory "$resourceName.json") $object 10
+}
+
+function Export-NitroObjects ($resourceNames, $resourceType, $targetDirectory, $propertyName = $resourceType, $excludeNames = @()) {
+    foreach ($resourceName in (Get-UniqueValues $resourceNames)) {
+        if ($excludeNames -contains $resourceName) { continue }
+        Export-NitroObject $resourceName $resourceType $targetDirectory $propertyName
+    }
+}
+
+function Get-LBvServerDependencies ($vserverName) {
+    return [ordered]@{
+        ServiceGroups = Get-BindingValues 'lbvserver_servicegroup_binding' $vserverName 'servicegroupname'
+        Services      = Get-BindingValues 'lbvserver_service_binding' $vserverName 'servicename'
+    }
+}
+
+function Get-ResourceDependencies ($resourceType, $resourceName, $defaultMonitors) {
+    $dependencies = [ordered]@{
         Servers  = @()
         Monitors = @()
     }
-    if ($type -eq 'servicegroup') {
-        $members = Invoke-RestMethod -Uri "$baseUri/servicegroup_servicegroupmember_binding/$name" -WebSession $session -Method Get
-        if ($members.servicegroup_servicegroupmember_binding) {
-            foreach ($member in $members.servicegroup_servicegroupmember_binding) {
-                if ($member.servername) { $deps.Servers += $member.servername }
-            }
+    switch ($resourceType) {
+        'servicegroup' {
+            $dependencies.Servers = Get-BindingValues 'servicegroup_servicegroupmember_binding' $resourceName 'servername'
+            $dependencies.Monitors = Get-BindingValues 'servicegroup_lbmonitor_binding' $resourceName 'monitor_name' $defaultMonitors
         }
-        $monBindings = Invoke-RestMethod -Uri "$baseUri/servicegroup_lbmonitor_binding/$name" -WebSession $session -Method Get
-        if ($monBindings.servicegroup_lbmonitor_binding) {
-            foreach ($mon in $monBindings.servicegroup_lbmonitor_binding) {
-                $m = $mon.monitor_name
-                if ($m -and ($defaultMonitors -notcontains $m)) { $deps.Monitors += $m }
-            }
+        'service' {
+            $service = Get-NitroObject 'service' $resourceName 'service'
+            if ($service -and $service.servername) { $dependencies.Servers = @($service.servername) }
+            $dependencies.Monitors = Get-BindingValues 'service_lbmonitor_binding' $resourceName 'monitor_name' $defaultMonitors
         }
     }
-    elseif ($type -eq 'service') {
-        $svcDetail = Invoke-RestMethod -Uri "$baseUri/service/$name" -WebSession $session -Method Get
-        if ($svcDetail.service.servername) { $deps.Servers += $svcDetail.service.servername }
-        $monBindings = Invoke-RestMethod -Uri "$baseUri/service_lbmonitor_binding/$name" -WebSession $session -Method Get
-        if ($monBindings.service_lbmonitor_binding) {
-            foreach ($mon in $monBindings.service_lbmonitor_binding) {
-                $m = $mon.monitor_name
-                if ($m -and ($defaultMonitors -notcontains $m)) { $deps.Monitors += $m }
-            }
-        }
-    }
-    return $deps
+    return $dependencies
 }
+
+function Remove-EmptyDirectories ($paths) { foreach ($path in $paths) { if ((dir $path -File -EA 0).Count -eq 0) { del $path -Force -Recurse } } }
 
 # =====================
 # Main Script
 # =====================
-cls
+Clear-Host
 # Trust all SSL (self-signed)
 [System.Net.ServicePointManager]::CheckCertificateRevocationList = { $false }
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$baseUri = "https://$NetScalerHost/nitro/v1/config"
 
-# Login
-$loginBody = @{ login = @{ username = $NetScalerUser; password = $NetScalerPassword; timeout = "300" } } | ConvertTo-Json
+# Login (retrieve session cookie, NetScaler expects {login={...}})
+$loginBody = @{ login = @{ username = $NetScalerUser; password = $NetScalerPassword; timeout = '300' } } | ConvertTo-Json
 $null = Invoke-RestMethod -Uri "$baseUri/login" -Method Post -Body $loginBody -ContentType 'application/json' -SessionVariable session
 
-# Get all LB vServers
-$vservers = Invoke-RestMethod -Uri "$baseUri/lbvserver" -WebSession $session -Method Get
+$vservers = Get-NitroCollection (Invoke-NitroApi 'lbvserver') 'lbvserver'
 
-# Prepare export folders
-$exportDir = "$PSScriptRoot\$NetScalerHost"
-$serversDir = "$exportDir\Servers"
-$monitorsDir = "$exportDir\Monitors"
-$ServiceGroupsDir = "$exportDir\ServiceGroups"
-$ServicesDir = "$exportDir\Services"
-$null = New-Item -Path $exportDir -ItemType Directory -Force -EA 0
-$null = New-Item -Path $serversDir -ItemType Directory -Force -EA 0
-$null = New-Item -Path $monitorsDir -ItemType Directory -Force -EA 0
-$null = New-Item -Path $ServiceGroupsDir -ItemType Directory -Force -EA 0
-$null = New-Item -Path $ServicesDir -ItemType Directory -Force -EA 0
+$exportDirectory = Join-Path $PSScriptRoot $NetScalerHost
+$serversDirectory = Join-Path $exportDirectory 'Servers'
+$monitorsDirectory = Join-Path $exportDirectory 'Monitors'
+$serviceGroupsDirectory = Join-Path $exportDirectory 'ServiceGroups'
+$servicesDirectory = Join-Path $exportDirectory 'Services'
 
-# Exclusion list for default monitors
-$defaultMonitors = @('ping-default', 'tcp-default', 'quic-default', 'kafka-autodiscover', 'arp', 'nd6', 'ping', 'tcp', 'http', 'tcp-ecv', 'http-ecv', 'udp-ecv', 'dns', 'ftp', 'tcps', 'https', 'tcps-ecv', 'https-ecv', 'xdm', 'xnc', 'mqtt', 'mqtt-tls', 'http2direct', 'http2ssl', 'dtls', 'ldns-ping', 'ldns-tcp', 'ldns-dns', 'stasecure', 'sta', 'VPN_INT_MON-0')
+$null = MD $exportDirectory -Force -EA 0
+$null = MD $serversDirectory -Force -EA 0
+$null = MD $monitorsDirectory -Force -EA 0
+$null = MD $serviceGroupsDirectory -Force -EA 0
+$null = MD $servicesDirectory -Force -EA 0
 
-# Collect all dependencies
+$defaultMonitors = @(
+    'ping-default', 'tcp-default', 'quic-default', 'kafka-autodiscover', 'arp', 'nd6', 'ping', 'tcp', 'http',
+    'tcp-ecv', 'http-ecv', 'udp-ecv', 'dns', 'ftp', 'tcps', 'https', 'tcps-ecv', 'https-ecv', 'xdm', 'xnc',
+    'mqtt', 'mqtt-tls', 'http2direct', 'http2ssl', 'dtls', 'ldns-ping', 'ldns-tcp', 'ldns-dns', 'stasecure',
+    'sta', 'VPN_INT_MON-0'
+)
+
 $allServerNames = @()
 $allMonitorNames = @()
 $allServiceGroupNames = @()
 $allServiceNames = @()
 
-# Verzamel alle unieke ServiceGroups/Services voor latere export
-$allServiceGroupNames = @()
-$allServiceNames = @()
-$allServerNames = @()
-$allMonitorNames = @()
-
-foreach ($vserver in $vservers.lbvserver) {
+foreach ($vserver in $vservers) {
     if ($vserver.name -like "$CoreLogicPrefix*") { continue }
-    $deps = Get-LBvServerDependency $vserver $session $baseUri
+
+    $dependencies = Get-LBvServerDependencies $vserver.name
     $vserverExport = $vserver.PSObject.Copy()
-    if ($deps.ServiceGroups.Count -gt 0) { $vserverExport | Add-Member -MemberType NoteProperty -Name servicegroups -Value $deps.ServiceGroups }
-    if ($deps.Services.Count -gt 0) { $vserverExport | Add-Member -MemberType NoteProperty -Name services -Value $deps.Services }
-    $outputPath = Join-Path -Path $exportDir -ChildPath ("$($vserver.name).json")
-    $vserverExport | ConvertTo-Json -Depth 12 | Set-Content -Path $outputPath -Encoding UTF8
-    $allServiceGroupNames += $deps.ServiceGroups
-    $allServiceNames += $deps.Services
+
+    if ($dependencies.ServiceGroups.Count -gt 0) { $vserverExport | Add-Member -MemberType NoteProperty -Name servicegroups -Value $dependencies.ServiceGroups -Force }
+    if ($dependencies.Services.Count -gt 0) { $vserverExport | Add-Member -MemberType NoteProperty -Name services -Value $dependencies.Services -Force }
+
+    Save-JsonFile (Join-Path $exportDirectory "$($vserver.name).json") $vserverExport
+    $allServiceGroupNames += $dependencies.ServiceGroups
+    $allServiceNames += $dependencies.Services
 }
 
-# ServiceGroups exporteren met hun eigen dependencies-blok
-$allServiceGroupNames = $allServiceGroupNames | Sort-Object -Unique
+foreach ($serviceGroupName in (Get-UniqueValues $allServiceGroupNames)) {
+    $serviceGroup = Get-NitroObject 'servicegroup' $serviceGroupName 'servicegroup'
+    if (!$serviceGroup) { continue }
 
-# ServiceGroups exporteren met dependencies-blok
-foreach ($sgName in $allServiceGroupNames) {
-    $sgDetail = Invoke-RestMethod -Uri "$baseUri/servicegroup/$sgName" -WebSession $session -Method Get
-    $sgExport = $sgDetail.servicegroup
-    if ($sgExport -is [System.Collections.IEnumerable] -and $sgExport.Count -gt 0) { $sgExport = $sgExport[0] }
-    $sgDeps = Get-ObjectDependency 'servicegroup' $sgName $session $baseUri $defaultMonitors
-    # Voeg monitors direct toe als property
-    if ($sgDeps.Monitors.Count -gt 0) { $sgExport | Add-Member -MemberType NoteProperty -Name monitors -Value $sgDeps.Monitors -Force }
-    # memberport ophalen uit bindings
-    $memberBindings = Invoke-RestMethod -Uri "$baseUri/servicegroup_servicegroupmember_binding/$sgName" -WebSession $session -Method Get
-    $sgMembers = @()
-    if ($memberBindings.servicegroup_servicegroupmember_binding) {
-        foreach ($member in $memberBindings.servicegroup_servicegroupmember_binding) {
-            $memberObj = [PSCustomObject]@{ servername = $member.servername; port = $member.port }
-            if ($member.weight) { $memberObj | Add-Member -MemberType NoteProperty -Name weight -Value $member.weight }
-            if ($member.order) { $memberObj | Add-Member -MemberType NoteProperty -Name order -Value $member.order }
-            $sgMembers += $memberObj
-        }
-    }
-    if ($sgMembers.Count -gt 0) { $sgExport | Add-Member -MemberType NoteProperty -Name servicegroupmember -Value $sgMembers -Force }
-    $outputPath = Join-Path -Path $ServiceGroupsDir -ChildPath ("$sgName.json")
-    $sgExport | ConvertTo-Json -Depth 12 | Set-Content -Path $outputPath -Encoding UTF8
-    $allServerNames += $sgDeps.Servers
-    $allMonitorNames += $sgDeps.Monitors
+    $dependencies = Get-ResourceDependencies 'servicegroup' $serviceGroupName $defaultMonitors
+    if ($dependencies.Monitors.Count -gt 0) { $serviceGroup | Add-Member -MemberType NoteProperty -Name monitors -Value $dependencies.Monitors -Force }
+
+    $members = Get-BindingRecords 'servicegroup_servicegroupmember_binding' $serviceGroupName @('servername', 'port', 'weight', 'serverid', 'hashid', 'state')
+    if ($members) { $serviceGroup | Add-Member -MemberType NoteProperty -Name servicegroupmember -Value $members -Force }
+
+    Save-JsonFile (Join-Path $serviceGroupsDirectory "$serviceGroupName.json") $serviceGroup
+    $allServerNames += $dependencies.Servers
+    $allMonitorNames += $dependencies.Monitors
 }
 
-# Services exporteren met dependencies-blok
-$allServiceNames = $allServiceNames | Sort-Object -Unique
-foreach ($svcName in $allServiceNames) {
-    $svcDetail = Invoke-RestMethod -Uri "$baseUri/service/$svcName" -WebSession $session -Method Get
-    $svcExport = $svcDetail.service
-    $svcDeps = Get-ObjectDependency 'service' $svcName $session $baseUri $defaultMonitors
-    $svcExport | Add-Member -MemberType NoteProperty -Name dependencies -Value $svcDeps
-    $outputPath = Join-Path -Path $ServicesDir -ChildPath ("$svcName.json")
-    $svcExport | ConvertTo-Json -Depth 12 | Set-Content -Path $outputPath -Encoding UTF8
-    $allServerNames += $svcDeps.Servers
-    $allMonitorNames += $svcDeps.Monitors
+foreach ($serviceName in (Get-UniqueValues $allServiceNames)) {
+    $service = Get-NitroObject 'service' $serviceName 'service'
+    if (!$service) { continue }
+
+    $dependencies = Get-ResourceDependencies 'service' $serviceName $defaultMonitors
+    $service | Add-Member -MemberType NoteProperty -Name dependencies -Value $dependencies -Force
+
+    Save-JsonFile (Join-Path $servicesDirectory "$serviceName.json") $service
+    $allServerNames += $dependencies.Servers
+    $allMonitorNames += $dependencies.Monitors
 }
 
-# Servers en monitors dedupliceren
-$allServerNames = $allServerNames | Sort-Object -Unique
-$allMonitorNames = $allMonitorNames | Sort-Object -Unique
+Export-NitroObjects $allServerNames 'server' $serversDirectory 'server'
+Export-NitroObjects $allMonitorNames 'lbmonitor' $monitorsDirectory 'lbmonitor' $defaultMonitors
 
-# Export all objects
-Export-NitroObject $allServerNames 'server' $serversDir 'server' $session @()
-Export-NitroObject $allMonitorNames 'monitor' $monitorsDir 'monitor' $session $defaultMonitors
+Remove-EmptyDirectories @($serversDirectory, $serviceGroupsDirectory, $servicesDirectory, $monitorsDirectory)
 
-# Deduplicate
-$allServerNames = $allServerNames | Sort-Object -Unique
-$allMonitorNames = $allMonitorNames | Sort-Object -Unique
-$allServiceGroupNames = $allServiceGroupNames | Sort-Object -Unique
-$allServiceNames = $allServiceNames | Sort-Object -Unique
-
-# Export all objects
-Export-NitroObject $allServerNames 'server' $serversDir 'server' $session @()
-Export-NitroObject $allMonitorNames 'monitor' $monitorsDir 'monitor' $session $defaultMonitors
-
-# Remove empty folders
-foreach ($dir in @($serversDir, $ServiceGroupsDir, $ServicesDir, $monitorsDir)) {
-    if ((Get-ChildItem -Path $dir -File -EA 0).Count -eq 0) {
-        Remove-Item -Path $dir -Force -Recurse
-    }
-}
-
-# Logout
-$null = Invoke-RestMethod -Uri "$baseUri/logout" -Method Post -Body (ConvertTo-Json @{logout = @{} }) -WebSession $session -ContentType 'application/json'
+$null = Invoke-NitroApi 'logout' $null 'Post' (ConvertTo-Json @{ logout = @{} })
