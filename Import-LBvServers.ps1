@@ -209,6 +209,9 @@ foreach ($row in $selectedGrid) {
     $vserverBody = @{ lbvserver = $filteredLB } | ConvertTo-Json -Depth 10
     Invoke-NitroApi -Uri "$baseUri/lbvserver" -Body $vserverBody -Type "lbvserver" -Session $session
 
+    $smBody = @{ policystringmap_pattern_binding = @{ name = "SM_CL1009_IP_CONTROL"; key = $json.name.ToLower(); value = "list=blocklist;" } } | ConvertTo-Json  
+    Invoke-NitroApi -Uri "$baseUri/policystringmap_pattern_binding" -Body $smBody -Type "policystringmap_pattern_binding" -Session $session
+
     # Import all ServiceGroups
     foreach ($sgName in $neededServiceGroups) {
         $sgHash = @{$sgName = $true }
