@@ -136,6 +136,7 @@ Argument-driven examples:
 3. Keep that folder next to `Import-LBvServers.ps1`.
 4. Run the import script against the target NetScaler.
 5. Select the vServers to import in `Out-GridView`.
+6. Run the `Create-SMEntries.ps1` to create the Content Switch traffic flows.
 
 ## Disclaimer
 
