@@ -63,6 +63,22 @@ Parameters:
 - `NetScalerHost`: Hostname or IP address of the Citrix ADC / NetScaler appliance
 - `NetScalerUser`: Username for the Nitro API
 - `NetScalerPassword`: Password for the Nitro API
+- `CoreLogicPrefix`: LB vServers with this prefix are excluded from export
+
+### Import
+
+```powershell
+.\Import-LBvServers.ps1 `
+   -NetScalerHost vpx01 `
+   -NetScalerUser nsroot `
+   -NetScalerPassword nsr00t
+```
+
+Parameters:
+
+- `NetScalerHost`: Hostname or IP address of the Citrix ADC / NetScaler appliance
+- `NetScalerUser`: Username for the Nitro API
+- `NetScalerPassword`: Password for the Nitro API
 
 ### Create StringMap Entry
 
@@ -96,7 +112,7 @@ Argument-driven examples:
    -LBvServer 'VS_printer.millaard.nl_P'
 
 .\Create-SMEntries.ps1 `
-   -Url 'https://webmail.millaard.nl/owa' `
+   -Url 'webmail.millaard.nl' `
    -Scope ANY `
    -LBvServer 'VS_webmail.millaard.nl_P' `
    -ResponseCode 302 `
@@ -106,23 +122,6 @@ Argument-driven examples:
    -EntryKey 'cs_millaard.nl_ssl;any;printer.millaard.nl' `
    -EntryValue 'vs=VS_printer.millaard.nl_P;'
 ```
-
-- `CoreLogicPrefix`: LB vServers with this prefix are excluded from export
-
-### Import
-
-```powershell
-.\Import-LBvServers.ps1 `
-   -NetScalerHost vpx01 `
-   -NetScalerUser nsroot `
-   -NetScalerPassword nsr00t
-```
-
-Parameters:
-
-- `NetScalerHost`: Hostname or IP address of the Citrix ADC / NetScaler appliance
-- `NetScalerUser`: Username for the Nitro API
-- `NetScalerPassword`: Password for the Nitro API
 
 ## Requirements
 
